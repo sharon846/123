@@ -76,7 +76,7 @@ class LottoEnv:
         return observation, reward, terminated, suc
 
 # dump variable
-env = LottoEnv(dataset, history_len=7) 
+env = LottoEnv(dataset, history_len=10) 
 
 # Define Policy
 class DecayEpsilonGreedy():
@@ -118,14 +118,14 @@ class QNetwork(nn.Module):
     return self.fc3(x)
 
 
-NUM_ACTS = env.n_actions;
-NUM_PARAMS = env.history_len;
+NUM_ACTS = env.n_actions
+NUM_PARAMS = env.history_len
 
 class Agent(object):
 
     def __init__(self, hidden_size, discount, epsilon):
 
-        self.action_policy   = DecayEpsilonGreedy(epsilon, 9.99e-2)
+        self.action_policy   = DecayEpsilonGreedy(epsilon, 9.99e-5)
         self.replay_buffer   = deque([], maxlen=MAX_CAPICITY)
         self.discount        = discount
 
@@ -200,7 +200,7 @@ agent = Agent(hidden_size=64, discount=0.99, epsilon=1.0)	# was 0.5
 rewards = []
 losses = []
 
-n_games = 1000
+n_games = 10000
 step = 0
 
 for game_num in range(n_games):
