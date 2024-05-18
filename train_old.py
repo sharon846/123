@@ -24,17 +24,32 @@ dataset = np.sort(dataset, axis=1)
 dataset = 100 * dataset[:, 0] + 10 * dataset[:, 1] + dataset[: ,2]
 
 class DQN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
+    def __init__(self, input_size, fc_num, hidden_size, output_size):
         super(DQN, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
 
-        fc_layers = [nn.Linear(input_size, hidden_size), nn.ReLU()]
-        fc_layers += [nn.Linear(hidden_size, hidden_size//2), nn.ReLU()]
-        fc_layers += [nn.Linear(hidden_size//2, hidden_size//2), nn.ReLU()]
-        fc_layers.append(nn.Linear(hidden_size//2, output_size))
+        fc_layers = []
+        if fc_num > 1:
+            fc_layers += [nn.Linear(hidden_size, hidden_size), nn.ReLU()] * (fc_num - 1)
+        fc_layers.append(nn.Linear(hidden_size, output_size))
         self.fc = nn.Sequential(*fc_layers)
 
     def forward(self, x):
-        out = self.fc(x)
+        # Initialize hidden state with zeros
+        h0 = torch.zeros(1, x.size(0), self.lstm.hidden_size).to(x.device)
+        # Initialize cell state
+        c0 = torch.zeros(1, x.size(0), self.lstm.hidden_size).to(x.device)
+
+        # We need to unsqueeze the sequence length dimension
+        x = x.unsqueeze(1)
+
+        # LSTM layer
+        out, _ = self.lstm(x, (h0,c0))
+
+        # Get the output from the last time step
+        out = out[:, -1, :]
+
+        out = self.fc(out)
         return out
 
 
@@ -55,7 +70,7 @@ class LottoEnv:
         self.idx = 7000
         self.steps = 0
         self.patience = self.patience_const * self.max_steps
-        return self.db[self.idx:self.idx+self.history_len].flatten()
+        return np.ascontiguousarray(self.db[self.idx:self.idx+self.history_len][::-1])
 
     def step(self, action):
         self.idx = self.idx - 1
@@ -68,13 +83,12 @@ class LottoEnv:
         else:
           self.steps = 0
 
-        reward = 10 * (2 * int(suc) - 1)                #10 or -10 for faster impact
+        reward = int(suc)
 
         if self.idx < 1001:
           self.idx = 7000
 
-        observation = self.db[self.idx:self.idx+self.history_len].flatten()
-        #print(observation)
+        observation = np.ascontiguousarray(self.db[self.idx:self.idx+self.history_len][::-1])
         terminated = self.steps == self.max_steps        # leave space for testing
 
         if terminated:
@@ -106,15 +120,14 @@ class ReplayMemory(object):
 parser = argparse.ArgumentParser(description='Net settings')
 parser.add_argument('--lstm_hidden_size', type=int, help='LSTM hidden layer size')
 parser.add_argument('--decay_param', type=float, help='Prize Decay parameter')
-parser.add_argument('--history_len', default=5, type=int, help='States number')
-parser.add_argument('--patience', type=int, default=15, help='Patience for each reward')
+parser.add_argument('--history_len', type=int, help='States number')
+parser.add_argument('--fc_num', type=int, help='FC layers number')
+parser.add_argument('--patience', type=int, help='Patience for each reward')
 parser.add_argument('--batch_size', type=int, help='batch size train on')
-parser.add_argument('--TAU', type=float, help='how mich should policy and target be clsoe')
 
 args = parser.parse_args()
 
-#id = f'L{args.lstm_hidden_size}_D{int(100*args.decay_param)}_H{args.history_len}_P{args.patience}_B{args.batch_size}_T{args.TAU}'
-id = f'L{args.lstm_hidden_size}_D{int(100*args.decay_param)}_B{args.batch_size}_T{args.TAU}'
+id = f'L{args.lstm_hidden_size}_D{int(100*args.decay_param)}_H{args.history_len}_FC{args.fc_num}_P{args.patience}_B{args.batch_size}_R10'
 
 # BATCH_SIZE is the number of transitions sampled from the replay buffer
 # GAMMA is the discount factor as mentioned in the previous section
@@ -127,8 +140,8 @@ BATCH_SIZE = args.batch_size
 GAMMA = args.decay_param
 EPS_START = 0.9
 EPS_END = 0.05
-EPS_DECAY = 5_000 # relevant for exp decay
-TAU = args.TAU  #0.005
+EPS_DECAY = 1000
+TAU = 0.005
 LR = 1e-4
 
 env = LottoEnv(dataset, args.history_len, args.patience)
@@ -138,12 +151,12 @@ n_actions = env.n_actions
 # Get the number of state observations
 state = env.reset()
 
-policy_net = DQN(len(state), args.lstm_hidden_size, n_actions).to(device)
-target_net = DQN(len(state), args.lstm_hidden_size, n_actions).to(device)
+policy_net = DQN(len(state), args.fc_num, args.lstm_hidden_size, n_actions).to(device)
+target_net = DQN(len(state), args.fc_num, args.lstm_hidden_size, n_actions).to(device)
 target_net.load_state_dict(policy_net.state_dict())
 
 optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
-memory = ReplayMemory(5000)
+memory = ReplayMemory(10000)
 
 
 steps_done = 0
@@ -212,10 +225,12 @@ def optimize_model():
 def evaluate_data(start, stop):
   score = 0
   for id in range(start,stop):
-      state = dataset[id:id+args.history_len].flatten()
+      state = np.ascontiguousarray(dataset[id:id+args.history_len][::-1])
       state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
       action = target_net(state).max(1).indices.view(1, 1).item()
-      action = env.action_space[action]
+      action = np.array([int(digit) for digit in str(action)])
+      action = np.sort(action)
+      action = int(''.join(map(str, action)))
 
       score += int(dataset[id-1] == action)
   return score / (stop - start)
@@ -231,7 +246,7 @@ def plot(epochs_num, rewards_in_epoch, accuracy_train, accuracy_validation):
   plt.title('Acc Comparison Per Epochs')
 
   plt.legend()
-  plt.savefig(f'../results/{id}_R10.png')
+  plt.savefig(f'{id}_R10.png')
   plt.close()
 
 def main():
@@ -249,7 +264,7 @@ def main():
       # Initialize the environment and get it's state
       state = env.reset()
       state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-
+      
       rewards_in_epoch.append(0)
       for t in tqdm(count()):
           action = select_action(state)
@@ -294,9 +309,8 @@ def main():
   plot(num_episodes, rewards_in_epoch, accuracy_train, accuracy_validation)
 
 main()
-torch.save(target_net.state_dict(), f'../results/{id}_R10.pth')
-state = dataset[0:self.history_len].flatten()
+torch.save(target_net.state_dict(), f'{id}_R10.pth')
+state = np.ascontiguousarray(dataset[0:args.history_len][::-1])
 state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-action = target_net(state).max(1).indices.view(1, 1).item()
-action = env.action_space[action]
+print(target_net(state).max(1).indices.view(1, 1).item())
 print('Complete')
